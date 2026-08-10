@@ -1,0 +1,2 @@
+# Runtime dependencies for the Lambda function.
+# The handler and validation logic use only the Python standard library.

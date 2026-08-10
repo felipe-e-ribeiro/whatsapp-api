@@ -1,0 +1,21 @@
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# AWS SAM build output
+.aws-sam/
+
+# macOS
+.DS_Store
+
+# Claude Dir
+.claude
+openspec

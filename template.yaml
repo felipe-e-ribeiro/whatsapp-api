@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  WhatsApp link API — GET /{number} returns the wa.me deep link for a
+  Brazilian DDD + phone number, or false if the number isn't recognized.
+
+Globals:
+  Function:
+    Timeout: 5
+    MemorySize: 128
+    Runtime: python3.12
+    Architectures:
+      - arm64
+
+Resources:
+  WhatsappLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.handler.lambda_handler
+      CodeUri: .
+      Events:
+        GetWhatsappLink:
+          Type: HttpApi
+          Properties:
+            Path: /{number}
+            Method: GET
+
+Outputs:
+  WhatsappLinkApiUrl:
+    Description: Base URL for the WhatsApp link API
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/{number}"
