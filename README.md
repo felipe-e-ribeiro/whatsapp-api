@@ -1,5 +1,8 @@
 # WhatsApp Link API
 
+[![CD](https://github.com/felipe-e-ribeiro/whatsapp-api/actions/workflows/cd.yml/badge.svg)](https://github.com/felipe-e-ribeiro/whatsapp-api/actions/workflows/cd.yml)
+[![API](https://img.shields.io/badge/API-not_deployed_yet-lightgrey)](https://whatsapp-api.felipeduribeiro.com.br)
+
 A tiny AWS Lambda API that turns a Brazilian phone number into a WhatsApp
 Web deep link.
 

@@ -9,6 +9,9 @@ env:
   AWS_REGION: us-east-1
   STACK_NAME: whatsapp-api
 
+permissions:
+  contents: write
+
 jobs:
   deploy:
     name: Build & deploy to AWS
@@ -47,3 +50,42 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
+
+      - name: Fetch deployed API URL
+        id: api_url
+        run: |
+          URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='WhatsappLinkCustomDomainUrl'].OutputValue" \
+            --output text)
+          HOST="${URL#https://}"
+          HOST="${HOST%%/*}"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      # Only runs if every step above succeeded — on failure the job stops
+      # before this point, so the badge simply keeps showing the last
+      # successful URL. The green/red pass/fail signal itself comes from
+      # the native GitHub Actions "CD" badge in the README, which reflects
+      # the outcome of this whole workflow run automatically.
+      - name: Update README API badge
+        env:
+          HOST: ${{ steps.api_url.outputs.host }}
+        run: |
+          BADGE_HOST=$(echo "$HOST" | sed 's/-/--/g')
+          BADGE_LINE="[![API](https://img.shields.io/badge/API-${BADGE_HOST}-brightgreen)](https://${HOST})"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+
+          BADGE_LINE="$BADGE_LINE" perl -pi -e 's/^\[!\[API\].*/$ENV{BADGE_LINE}/' README.md
+
+          if git diff --quiet README.md; then
+            echo "README already up to date"
+          else
+            git add README.md
+            git commit -m "docs: update API URL badge [skip ci]"
+            git push origin main
+          fi

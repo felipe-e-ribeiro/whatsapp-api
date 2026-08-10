@@ -4,6 +4,20 @@ Description: >
   WhatsApp link API — GET /{number} returns the wa.me deep link for a
   Brazilian DDD + phone number, or false if the number isn't recognized.
 
+Parameters:
+  HostedZoneId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/infra/route53/hosted-zone-id"
+    Description: "Referência ao ID da zona no SSM"
+  CertificateArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/infra/ssl/wilcard_arn"
+    Description: "ARN do certificado ACM wildcard *.felipeduribeiro.com.br"
+  DomainName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/infra/route53/domain_whatsapp-api"
+    Description: "Domínio customizado da API do WhatsApp"
+
 Globals:
   Function:
     Timeout: 5
@@ -25,7 +39,35 @@ Resources:
             Path: /{number}
             Method: GET
 
+  ApiCustomDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref ServerlessHttpApi
+      DomainName: !Ref ApiCustomDomain
+      Stage: $default
+
+  WhatsappApiDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: CNAME
+      TTL: "300"
+      ResourceRecords:
+        - !GetAtt ApiCustomDomain.RegionalDomainName
+
 Outputs:
   WhatsappLinkApiUrl:
-    Description: Base URL for the WhatsApp link API
+    Description: Base URL for the WhatsApp link API (default execute-api endpoint)
     Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/{number}"
+  WhatsappLinkCustomDomainUrl:
+    Description: Base URL for the WhatsApp link API (custom domain)
+    Value: !Sub "https://${DomainName}/{number}"
