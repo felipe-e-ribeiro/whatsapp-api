@@ -24,12 +24,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test dependencies
-        run: pip install -r requirements-dev.txt
-
-      - name: Run tests before deploying
-        run: pytest
-
       - uses: aws-actions/setup-sam@v2
 
       - name: Configure AWS credentials
@@ -42,7 +36,12 @@ jobs:
       - name: sam build
         run: sam build
 
+      # Tests already ran in CI on the PR that led to this tag — CD only
+      # builds and ships. No continue-on-error here: if this step fails,
+      # the job is marked failed (keeping the native CD badge honest), but
+      # the steps below still run because they're set to if: always().
       - name: sam deploy
+        id: sam_deploy
         run: |
           sam deploy \
             --stack-name "$STACK_NAME" \
@@ -52,41 +51,85 @@ jobs:
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
 
+      # Best-effort: runs even if sam deploy failed, so the README badge
+      # below can report something useful either way.
+      - name: Read CloudFormation stack status
+        id: cfn_status
+        if: always()
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null) || true
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
       - name: Fetch deployed API URL
         id: api_url
+        if: always()
         run: |
           URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --query "Stacks[0].Outputs[?OutputKey=='WhatsappLinkCustomDomainUrl'].OutputValue" \
-            --output text)
+            --output text 2>/dev/null) || true
           HOST="${URL#https://}"
           HOST="${HOST%%/*}"
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
-      # Only runs if every step above succeeded — on failure the job stops
-      # before this point, so the badge simply keeps showing the last
-      # successful URL. The green/red pass/fail signal itself comes from
-      # the native GitHub Actions "CD" badge in the README, which reflects
-      # the outcome of this whole workflow run automatically.
-      - name: Update README API badge
+      # Always rewrites the same two badge lines in place (never appends),
+      # so the README never accumulates stale status history or extra
+      # noisy commits. Runs even if sam deploy failed, so the
+      # CloudFormation badge always reflects the latest attempt.
+      - name: Update README status badges
+        if: always()
         env:
           HOST: ${{ steps.api_url.outputs.host }}
+          CFN_STATUS: ${{ steps.cfn_status.outputs.status }}
+          DEPLOY_OUTCOME: ${{ steps.sam_deploy.outcome }}
         run: |
-          BADGE_HOST=$(echo "$HOST" | sed 's/-/--/g')
-          BADGE_LINE="[![API](https://img.shields.io/badge/API-${BADGE_HOST}-brightgreen)](https://${HOST})"
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout -B main origin/main
 
-          BADGE_LINE="$BADGE_LINE" perl -pi -e 's/^\[!\[API\].*/$ENV{BADGE_LINE}/' README.md
+          if [ -n "$HOST" ]; then
+            BADGE_HOST=$(echo "$HOST" | sed 's/-/--/g')
+            API_LINE="[![API](https://img.shields.io/badge/API-${BADGE_HOST}-brightgreen)](https://${HOST})"
+            API_LINE="$API_LINE" perl -pi -e 's/^\[!\[API\].*/$ENV{API_LINE}/' README.md
+          fi
+
+          # sam deploy's own exit code is the primary signal: a failure
+          # there (e.g. an IAM AccessDenied before any changeset ever
+          # executes) leaves the stack's StackStatus untouched, so relying
+          # on StackStatus alone would misreport "OK".
+          if [ "$DEPLOY_OUTCOME" = "failure" ]; then
+            case "$CFN_STATUS" in
+              *ROLLBACK*|*FAILED*) LABEL="$CFN_STATUS" ;;
+              *) LABEL="DEPLOY_FAILED" ;;
+            esac
+            COLOR="red"
+          else
+            case "$CFN_STATUS" in
+              *_COMPLETE)
+                case "$CFN_STATUS" in
+                  *ROLLBACK*) LABEL="$CFN_STATUS"; COLOR="red" ;;
+                  *) LABEL="OK"; COLOR="brightgreen" ;;
+                esac
+                ;;
+              "") LABEL="UNKNOWN"; COLOR="red" ;;
+              *) LABEL="$CFN_STATUS"; COLOR="red" ;;
+            esac
+          fi
+
+          BADGE_LABEL=$(echo "$LABEL" | sed 's/-/--/g; s/_/__/g')
+          CFN_LINE="[![CloudFormation](https://img.shields.io/badge/CloudFormation-${BADGE_LABEL}-${COLOR})](https://${AWS_REGION}.console.aws.amazon.com/cloudformation/home?region=${AWS_REGION}#/stacks?filteringText=${STACK_NAME})"
+          CFN_LINE="$CFN_LINE" perl -pi -e 's/^\[!\[CloudFormation\].*/$ENV{CFN_LINE}/' README.md
 
           if git diff --quiet README.md; then
             echo "README already up to date"
           else
             git add README.md
-            git commit -m "docs: update API URL badge [skip ci]"
+            git commit -m "docs: update deploy status badges [skip ci]"
             git push origin main
           fi
