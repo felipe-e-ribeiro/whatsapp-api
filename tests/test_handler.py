@@ -46,3 +46,24 @@ class TestLambdaHandler:
         assert json.loads(response["body"]) == {
             "result": "https://wa.me/5511987654321"
         }
+
+    def test_number_without_country_code_defaults_to_br(self):
+        response = lambda_handler(_event("11 0000-0000"), None)
+
+        assert json.loads(response["body"]) == {
+            "result": "https://wa.me/551100000000"
+        }
+
+    def test_number_with_explicit_country_code_is_accepted(self):
+        response = lambda_handler(_event("+55 11 0000-0000"), None)
+
+        assert json.loads(response["body"]) == {
+            "result": "https://wa.me/551100000000"
+        }
+
+    def test_number_with_country_code_and_no_formatting(self):
+        response = lambda_handler(_event("5511987654321"), None)
+
+        assert json.loads(response["body"]) == {
+            "result": "https://wa.me/5511987654321"
+        }

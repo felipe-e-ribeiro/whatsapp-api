@@ -1,4 +1,9 @@
-from src.phone import build_whatsapp_url, is_valid_br_number, normalize
+from src.phone import (
+    build_whatsapp_url,
+    is_valid_br_number,
+    normalize,
+    strip_country_code,
+)
 
 
 class TestNormalize:
@@ -16,6 +21,35 @@ class TestNormalize:
 
     def test_letters_only(self):
         assert normalize("abcdefghijk") == ""
+
+
+class TestStripCountryCode:
+    def test_strips_cc_from_landline(self):
+        assert strip_country_code("551133334444") == "1133334444"
+
+    def test_strips_cc_from_mobile(self):
+        assert strip_country_code("5511987654321") == "11987654321"
+
+    def test_leaves_landline_without_cc_untouched(self):
+        assert strip_country_code("1133334444") == "1133334444"
+
+    def test_leaves_mobile_without_cc_untouched(self):
+        assert strip_country_code("11987654321") == "11987654321"
+
+    def test_leaves_bare_ddd_55_mobile_untouched(self):
+        # DDD 55 is a real Brazilian area code (Santa Maria/RS); an
+        # 11-digit number starting with "55" here is DDD + mobile
+        # number, not a country code, so it must not be stripped.
+        assert strip_country_code("55987654321") == "55987654321"
+
+    def test_leaves_bare_ddd_55_landline_untouched(self):
+        assert strip_country_code("5533334444") == "5533334444"
+
+    def test_ignores_non_55_prefix(self):
+        assert strip_country_code("119876543210") == "119876543210"
+
+    def test_empty_string(self):
+        assert strip_country_code("") == ""
 
 
 class TestIsValidBrNumber:
