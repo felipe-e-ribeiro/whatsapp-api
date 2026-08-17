@@ -1,7 +1,6 @@
 # WhatsApp Link API
 
 [![CD](https://github.com/felipe-e-ribeiro/whatsapp-api/actions/workflows/cd.yml/badge.svg)](https://github.com/felipe-e-ribeiro/whatsapp-api/actions/workflows/cd.yml)
-[![API](https://img.shields.io/badge/API-whatsapp--api.felipeduribeiro.com.br-brightgreen)](https://whatsapp-api.felipeduribeiro.com.br)
 [![CloudFormation](https://img.shields.io/badge/CloudFormation-OK-brightgreen)](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks?filteringText=whatsapp-api)
 
 A tiny AWS Lambda API that turns a Brazilian phone number into a WhatsApp
@@ -84,6 +83,37 @@ the bare-DDD-55 edge case), and
 `tests/test_handler.py::TestLambdaHandler::test_number_with_explicit_country_code_is_accepted`
 / `test_number_without_country_code_defaults_to_br` cover it end-to-end
 through the handler.
+
+## Testing manually
+
+No AWS/SAM setup needed — the handler is a plain Python function, so you
+can call it directly from a REPL or a one-liner to poke at the code
+without running the full test suite.
+
+```bash
+python3 -c "
+from src.handler import lambda_handler
+
+event = {'pathParameters': {'number': '11987654321'}}
+print(lambda_handler(event, None))
+"
+# {'statusCode': 200, 'body': '{\"result\": \"https://wa.me/5511987654321\"}'}
+```
+
+Swap `number` for any of the [examples](#examples) above (or an invalid
+one) to check the behavior by hand. `src/phone.py` also exposes the
+individual validation/formatting functions (`normalize`,
+`strip_country_code`, `is_valid_br_number`, `build_whatsapp_url`) if you
+want to exercise just one piece of the logic:
+
+```bash
+python3 -c "
+from src.phone import normalize, strip_country_code, is_valid_br_number
+
+digits = strip_country_code(normalize('+55 11 98765-4321'))
+print(digits, is_valid_br_number(digits))
+"
+```
 
 ## Deploying
 
