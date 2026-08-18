@@ -47,7 +47,8 @@ v2 (new, event-driven, authenticated)
     LinksAuthorizerFunction (API Gateway Lambda Request Authorizer)
       → reads the expected key from Secrets Manager (in-memory cache)
       → compares it against the `x-api-key` request header
-      → denies (401) before the business Lambda ever runs, on mismatch
+      → denies (403 — the standard HttpApi Lambda-authorizer-denial status)
+        before the business Lambda ever runs, on mismatch
 
   POST /v2/links ──[auth]──► LinksSubmitFunction
                                 ├─ UpdateItem ADD on LinksCounterTable
@@ -141,7 +142,8 @@ DynamoDB's `ADD`/arithmetic `UpdateItem` is atomic.
   memory for the life of the execution environment, to avoid a Secrets
   Manager call on every request.
 - Request must include header `x-api-key: <value>`. Missing or mismatched
-  key → authorizer denies → API Gateway returns `401`.
+  key → authorizer denies → API Gateway returns `403` (HttpApi's standard
+  status for a Lambda authorizer denial — not `401`).
 - IAM: `LinksAuthorizerFunction` gets read-only access scoped to that one
   secret's ARN (not a wildcard `SecretsManagerReadWrite`).
 
@@ -169,7 +171,7 @@ DynamoDB's `ADD`/arithmetic `UpdateItem` is atomic.
 
 | Case | Behavior |
 |---|---|
-| Missing/incorrect `x-api-key` on any `v2` route | `401`, request never reaches the business Lambda |
+| Missing/incorrect `x-api-key` on any `v2` route | `403`, request never reaches the business Lambda |
 | `POST /v2/links` body missing `number` or not a string | `400`, nothing written, nothing enqueued |
 | Number doesn't resolve to a valid BR number | **Not an error** — same semantics as `v1`: `status: "completed"`, `result: false` |
 | Transient/bug failure inside `LinksProcessorFunction` | Exception → SQS redelivers up to `maxReceiveCount` (3) → then the message moves to `LinksDLQ`; the `LinksTable` record stays `"pending"` until someone inspects/redrives the DLQ (alarming is future work) |

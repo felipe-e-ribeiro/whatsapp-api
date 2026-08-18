@@ -8,7 +8,9 @@ Web deep link.
 
 ## What it does
 
-`GET /{number}`, where `{number}` is a Brazilian DDD (area code) + local
+### v1 (synchronous)
+
+`GET /v1/{number}`, where `{number}` is a Brazilian DDD (area code) + local
 number, with an **optional** `+55`/`55` country code (formatting
 characters like spaces, parentheses, `+`, and dashes are ignored).
 
@@ -44,24 +46,88 @@ tell success from failure.
 ### Examples
 
 ```
-GET /11987654321          -> {"result": "https://wa.me/5511987654321"}
-GET /1133334444           -> {"result": "https://wa.me/551133334444"}
-GET /(11) 98765-4321      -> {"result": "https://wa.me/5511987654321"}
-GET /11 0000-0000         -> {"result": "https://wa.me/551100000000"}
-GET /+55 11 0000-0000     -> {"result": "https://wa.me/551100000000"}
-GET /5511987654321        -> {"result": "https://wa.me/5511987654321"}
-GET /123                  -> {"result": false}
+GET /v1/11987654321          -> {"result": "https://wa.me/5511987654321"}
+GET /v1/1133334444           -> {"result": "https://wa.me/551133334444"}
+GET /v1/(11) 98765-4321      -> {"result": "https://wa.me/5511987654321"}
+GET /v1/11 0000-0000         -> {"result": "https://wa.me/551100000000"}
+GET /v1/+55 11 0000-0000     -> {"result": "https://wa.me/551100000000"}
+GET /v1/5511987654321        -> {"result": "https://wa.me/5511987654321"}
+GET /v1/123                  -> {"result": false}
+```
+
+### v2 (event-driven)
+
+An asynchronous, authenticated version of the same lookup, built to
+exercise an event-driven pattern with SQS in the critical path instead of
+resolving the number inline. Every `v2` request requires an `x-api-key`
+header — see [Authentication](#authentication).
+
+**`POST /v2/links`** accepts the number, queues it for processing, and
+replies immediately — it does **not** validate the number itself yet:
+
+```
+POST /v2/links
+x-api-key: <key>
+Content-Type: application/json
+
+{"number": "11987654321"}
+```
+```json
+202 {"requestId": "8k", "status": "pending"}
+```
+
+**`GET /v2/links/{requestId}`** polls for the result:
+
+```
+GET /v2/links/8k
+x-api-key: <key>
+```
+```json
+200 {"requestId": "8k", "status": "pending"}
+```
+```json
+200 {"requestId": "8k", "status": "completed", "result": "https://wa.me/5511987654321"}
+```
+
+An unknown `requestId` returns `404`. A missing/incorrect `x-api-key`
+returns `403` (the standard HttpApi response for a Lambda authorizer
+denial) on either endpoint. `requestId`s are assigned from a shared
+counter, base62-encoded (`0-9`, `a-z`, `A-Z`) — the very first one ever
+issued is `8k` (516 in base62) — so they're sequential internally but
+don't read as a plain decimal counter externally.
+
+#### Authentication
+
+Every `v2` route is protected by a Lambda authorizer that checks the
+`x-api-key` header against a secret stored in AWS Secrets Manager
+(`LinksApiKeySecret` in `template.yaml`, auto-generated on deploy). Fetch
+the value to use it:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id <LinksApiKeySecret ARN or name> \
+  --query SecretString --output text | python3 -c "import json,sys; print(json.load(sys.stdin)['apiKey'])"
 ```
 
 ## Project layout
 
 ```
 src/
-  handler.py   # Lambda entry point
-  phone.py     # pure validation/formatting logic (no AWS deps)
+  handler.py            # v1 Lambda entry point
+  phone.py              # pure validation/formatting logic (no AWS deps), shared by v1 and v2
+  base62.py             # pure base62 encoding, used for v2 request IDs
+  links_authorizer.py   # v2 Lambda authorizer (x-api-key vs. Secrets Manager)
+  links_submit.py       # v2: POST /v2/links — queues a request
+  links_processor.py    # v2: SQS consumer — resolves the number, stores the result
+  links_status.py       # v2: GET /v2/links/{requestId} — polls for the result
 tests/
   test_handler.py
   test_phone.py
+  test_base62.py
+  test_links_authorizer.py
+  test_links_submit.py
+  test_links_processor.py
+  test_links_status.py
 template.yaml  # AWS SAM infrastructure definition
 ```
 
@@ -85,6 +151,8 @@ the bare-DDD-55 edge case), and
 through the handler.
 
 ## Testing manually
+
+### v1
 
 No AWS/SAM setup needed — the handler is a plain Python function, so you
 can call it directly from a REPL or a one-liner to poke at the code
@@ -112,6 +180,65 @@ from src.phone import normalize, strip_country_code, is_valid_br_number
 
 digits = strip_country_code(normalize('+55 11 98765-4321'))
 print(digits, is_valid_br_number(digits))
+"
+```
+
+### v2
+
+Unlike v1, v2's Lambdas talk to real AWS resources (DynamoDB, SQS,
+Secrets Manager) — there's no dependency-free way to exercise the full
+flow without them. `sam build && sam local start-api` runs the Lambda
+*code* locally, but it still calls the real deployed DynamoDB
+tables/queue/secret over the network (via your local AWS
+credentials/region), and it **does** genuinely invoke
+`LinksAuthorizerFunction` for every request — SAM CLI prints a warning
+that local authorizer behavior isn't guaranteed to match AWS exactly, but
+in practice it calls Secrets Manager for real. So testing v2 requires the
+stack to be deployed at least once (`sam deploy`; see
+[Deploying](#deploying)):
+
+```bash
+sam build
+sam local start-api
+```
+
+Fetch the real key (see [Authentication](#authentication)) and submit a
+request:
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/v2/links \
+  -H "x-api-key: <key from Secrets Manager>" \
+  -H "Content-Type: application/json" \
+  -d '{"number": "11987654321"}'
+# 202 {"requestId": "8k", "status": "pending"}
+
+curl -i http://127.0.0.1:3000/v2/links/8k -H "x-api-key: <key>"
+# 200 {"requestId": "8k", "status": "pending"}   -- immediately after
+# 200 {"requestId": "8k", "status": "completed", "result": "..."}  -- once processed
+```
+
+A missing/wrong key returns `403` before your code ever runs:
+
+```bash
+curl -i http://127.0.0.1:3000/v2/links/8k -H "x-api-key: wrong"
+# 403 {"message":"User is not authorized to access this resource"}
+```
+
+Once the stack is deployed, the real `LinksProcessorFunction` in AWS
+drains the queue automatically within seconds — no manual step needed,
+even while you're driving `sam local start-api` against the same backing
+resources. The one case where you *do* want a manual trigger is iterating
+on `links_processor.py` itself: invoke it locally with a synthetic SQS
+record to test a code change before redeploying it, without needing to
+send a whole request through `POST /v2/links` first:
+
+```bash
+LINKS_TABLE_NAME=<deployed LinksTable name> python3 -c "
+import json
+from src.links_processor import lambda_handler
+
+event = {'Records': [{'body': json.dumps({'requestId': '8k', 'number': '11987654321'})}]}
+lambda_handler(event, None)
 "
 ```
 
