@@ -6,10 +6,6 @@ on:
       - "v*"
   workflow_dispatch:
 
-env:
-  AWS_REGION: us-east-1
-  STACK_NAME: whatsapp-api
-
 permissions:
   contents: write
 
@@ -17,6 +13,14 @@ jobs:
   deploy:
     name: Build & deploy to AWS
     runs-on: ubuntu-latest
+    env:
+      # Sourced from a repo secret rather than pinned here: this is a
+      # public repo and there's no reason for the workflow file to say
+      # which region the stack actually deploys to. (The workflow-level
+      # `env:` key can't see `secrets` at all - GitHub silently resolves it
+      # to an empty string there - so this has to live at job level.)
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      STACK_NAME: whatsapp-api
     steps:
       - uses: actions/checkout@v4
 

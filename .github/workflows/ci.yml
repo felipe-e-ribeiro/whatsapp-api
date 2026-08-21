@@ -20,6 +20,14 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run tests with coverage
+        env:
+          # src/links_*.py build their boto3 clients at import time with no
+          # region_name (fine in Lambda, where AWS_REGION is always set for
+          # us). Tests run entirely against moto, so this never talks to
+          # real AWS - it only needs to resolve an endpoint. Sourced from
+          # the repo secret instead of a literal so this public repo's
+          # workflow file doesn't say which region the stack deploys to.
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: pytest
 
   gitleaks:
