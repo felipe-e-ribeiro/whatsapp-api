@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  WhatsApp link API — GET /{number} returns the wa.me deep link for a
+  WhatsApp link API — GET /v1/{number} returns the wa.me deep link for a
   Brazilian DDD + phone number, or false if the number isn't recognized.
 
 Parameters:
@@ -36,8 +36,156 @@ Resources:
         GetWhatsappLink:
           Type: HttpApi
           Properties:
-            Path: /{number}
+            ApiId: !Ref WhatsappHttpApi
+            Path: /v1/{number}
             Method: GET
+
+  # Explicit HttpApi (every function event below references it via ApiId)
+  # so we can register the v2 Lambda authorizer on it. Deliberately not
+  # named "ServerlessHttpApi": that logical ID is special-cased by SAM's
+  # implicit-API plugin and, in this SAM CLI version, silently drops a
+  # custom Auth.Authorizers block when it's reused explicitly. v1's route
+  # stays unauthenticated by simply not referencing this authorizer on its
+  # event.
+  WhatsappHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          LinksApiKeyAuthorizer:
+            FunctionArn: !GetAtt LinksAuthorizerFunction.Arn
+            AuthorizerPayloadFormatVersion: "2.0"
+            EnableSimpleResponses: true
+            Identity:
+              Headers:
+                - x-api-key
+
+  # --- v2 (event-driven) storage, messaging, and secrets ---
+
+  LinksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: requestId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: requestId
+          KeyType: HASH
+
+  LinksCounterTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: counterId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: counterId
+          KeyType: HASH
+
+  LinksDLQ:
+    Type: AWS::SQS::Queue
+
+  LinksQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt LinksDLQ.Arn
+        maxReceiveCount: 3
+
+  LinksApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: >
+        API key required on every /v2/* WhatsApp Link API request, via the
+        x-api-key header.
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: apiKey
+        ExcludePunctuation: true
+        PasswordLength: 40
+
+  LinksAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_authorizer.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          API_KEY_SECRET_ID: !Ref LinksApiKeySecret
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref LinksApiKeySecret
+
+  LinksProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_processor.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          LINKS_TABLE_NAME: !Ref LinksTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        ProcessLinksQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LinksQueue.Arn
+            BatchSize: 1
+
+  LinksSubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_submit.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          LINKS_TABLE_NAME: !Ref LinksTable
+          LINKS_COUNTER_TABLE_NAME: !Ref LinksCounterTable
+          LINKS_QUEUE_URL: !Ref LinksQueue
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksCounterTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt LinksQueue.QueueName
+      Events:
+        SubmitLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WhatsappHttpApi
+            Path: /v2/links
+            Method: POST
+            Auth:
+              Authorizer: LinksApiKeyAuthorizer
+
+  LinksStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_status.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          LINKS_TABLE_NAME: !Ref LinksTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        GetLinkStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WhatsappHttpApi
+            Path: /v2/links/{requestId}
+            Method: GET
+            Auth:
+              Authorizer: LinksApiKeyAuthorizer
 
   ApiCustomDomain:
     Type: AWS::ApiGatewayV2::DomainName
@@ -50,7 +198,7 @@ Resources:
   ApiDomainMapping:
     Type: AWS::ApiGatewayV2::ApiMapping
     Properties:
-      ApiId: !Ref ServerlessHttpApi
+      ApiId: !Ref WhatsappHttpApi
       DomainName: !Ref ApiCustomDomain
       Stage: $default
 
@@ -67,7 +215,7 @@ Resources:
 Outputs:
   WhatsappLinkApiUrl:
     Description: Base URL for the WhatsApp link API (default execute-api endpoint)
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/{number}"
+    Value: !Sub "https://${WhatsappHttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1/{number}"
   WhatsappLinkCustomDomainUrl:
     Description: Base URL for the WhatsApp link API (custom domain)
-    Value: !Sub "https://${DomainName}/{number}"
+    Value: !Sub "https://${DomainName}/v1/{number}"
