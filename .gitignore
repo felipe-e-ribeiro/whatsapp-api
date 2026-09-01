@@ -19,5 +19,5 @@ htmlcov/
 .DS_Store
 
 # Claude Dir
-.claude
-openspec
+#.claude
+#openspec

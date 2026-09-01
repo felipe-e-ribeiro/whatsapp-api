@@ -26,9 +26,9 @@ def aws(monkeypatch):
 
         monkeypatch.setenv("LINKS_TABLE_NAME", "links")
 
-        import src.links_processor as links_processor
+        import src.links_store as links_store
 
-        links_processor._dynamodb = dynamodb
+        links_store._dynamodb = dynamodb
 
         yield {"links_table": links_table}
 
