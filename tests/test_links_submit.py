@@ -39,9 +39,10 @@ def aws(monkeypatch):
         monkeypatch.setenv("LINKS_COUNTER_TABLE_NAME", "links-counter")
         monkeypatch.setenv("LINKS_QUEUE_URL", queue_url)
 
+        import src.links_store as links_store
         import src.links_submit as links_submit
 
-        links_submit._dynamodb = dynamodb
+        links_store._dynamodb = dynamodb
         links_submit._sqs = sqs
 
         yield {

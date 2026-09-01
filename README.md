@@ -109,25 +109,159 @@ aws secretsmanager get-secret-value \
   --query SecretString --output text | python3 -c "import json,sys; print(json.load(sys.stdin)['apiKey'])"
 ```
 
+### v3 (orchestrated)
+
+Checkpoint 3: the same number-resolution problem, now driven by an
+explicit, structured **orchestration** instead of choreography — an
+**AWS Step Functions** state machine (the AWS-native equivalent of Google
+Cloud Workflows) that calls a chain of small Lambdas in order, retries
+transient failures with backoff, and routes exhausted failures to a
+dead-letter queue. `v3` is entirely parallel to `v1`/`v2`: separate
+Lambdas, separate DynamoDB table, separate DLQ — nothing here changes
+`v1`/`v2` behavior. It reuses the same `x-api-key` authentication as `v2`
+(see [Authentication](#authentication)).
+
+**`POST /v3/links`** accepts the number and starts an orchestrated
+pipeline execution, replying immediately without waiting for it to
+finish:
+
+```
+POST /v3/links
+x-api-key: <key>
+Content-Type: application/json
+
+{"number": "11987654321"}
+```
+```json
+202 {"requestId": "a1b2c3d4e5f6...", "status": "pending"}
+```
+
+**`GET /v3/links/{requestId}`** polls for the result, same shape as `v2`
+plus retry evidence (`attempts`, and `lastError` if a failure occurred):
+
+```json
+200 {"requestId": "a1b2c3d4e5f6...", "status": "pending"}
+```
+```json
+200 {"requestId": "a1b2c3d4e5f6...", "status": "completed", "result": "https://wa.me/5511987654321", "attempts": 1}
+```
+
+An invalid number (fails the same validation `v1`/`v2` use) resolves to
+`{"status": "invalid"}` rather than being retried — a bad input isn't a
+transient failure. A `requestId` that never completes retrying resolves to
+`{"status": "failed", "attempts": <n>, "lastError": <message>}`, and its
+payload is on the dead-letter queue.
+
+#### Pipeline
+
+The orchestration is defined in one place — `statemachine/links_pipeline.asl.yaml`
+(Amazon States Language, YAML) — as three ordered steps:
+
+```
+Validate  ->  Resolve  ->  Persist
+```
+
+- **Validate** (`src/links_v3_validate.py`) normalizes and validates the
+  number, reusing the exact same rules as `v1`/`v2` (`src/phone.py`). An
+  invalid number routes straight to `Persist` with `status: invalid`,
+  skipping `Resolve` entirely — validation failures aren't retried.
+- **Resolve** (`src/links_v3_resolve.py`) builds the `wa.me` link. This is
+  the step with a `Retry` policy (exponential backoff, up to 3 retries)
+  and a `Catch` that routes exhausted failures to the dead-letter queue.
+- **Persist** (`src/links_v3_persist.py`) writes the final outcome
+  (`completed`, `invalid`, or `failed`) to DynamoDB.
+
+#### Idempotency
+
+Submitting the same request twice doesn't start two pipeline runs.
+Supply an `Idempotency-Key` header with your own stable value:
+
+```bash
+curl -i -X POST "$API_DOMAIN/v3/links" \
+  -H "x-api-key: $API_KEY" \
+  -H "Idempotency-Key: my-stable-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"number": "11987654321"}'
+```
+
+Resubmitting with the same `Idempotency-Key` returns the same
+`requestId` and does not start a second execution — Step Functions
+itself rejects a duplicate execution name, and `links_v3_start.py` treats
+that rejection as a successful (idempotent) response rather than an
+error. If you don't supply the header, a new key is generated for you
+each time (no dedup guarantee in that case — the usual HTTP
+idempotency-key convention).
+
+#### Demonstrating retry and the dead-letter queue
+
+Real transient AWS failures aren't reproducible on demand, so `Resolve`
+accepts an optional `simulateFailures` field, passed straight through in
+the request body, purely to exercise the `Retry`/`Catch` mechanism:
+
+```bash
+# Fails twice, then succeeds on the 3rd attempt (within the configured
+# MaxAttempts: 3) — ends up "completed", with "attempts": 3.
+curl -i -X POST "$API_DOMAIN/v3/links" \
+  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"number": "11987654321", "simulateFailures": 2}'
+
+# Fails more times than the retry budget allows — ends up "failed",
+# and the request's payload lands on LinksV3DLQ.
+curl -i -X POST "$API_DOMAIN/v3/links" \
+  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"number": "11987654321", "simulateFailures": 99}'
+```
+
+Poll `GET /v3/links/{requestId}` afterward — `attempts` and (when
+applicable) `lastError` are stored on the record itself, so the retry
+evidence is visible without needing AWS console/CLI access.
+
+To inspect it from the AWS side instead (useful for a deeper look):
+
+```bash
+# See every retry attempt in the execution's history:
+aws stepfunctions get-execution-history --execution-arn <execution ARN>
+
+# See the message that landed on the dead-letter queue after exhausted retries:
+aws sqs receive-message --queue-url <LinksV3DLQ URL>
+```
+
+(The execution ARN and DLQ URL are stack outputs/resource identifiers —
+not published in this repo; use your own deployed stack's values.)
+
 ## Project layout
 
 ```
 src/
   handler.py            # v1 Lambda entry point
-  phone.py              # pure validation/formatting logic (no AWS deps), shared by v1 and v2
+  phone.py              # pure validation/formatting logic (no AWS deps), shared by v1/v2/v3
   base62.py             # pure base62 encoding, used for v2 request IDs
-  links_authorizer.py   # v2 Lambda authorizer (x-api-key vs. Secrets Manager)
+  links_store.py        # shared DynamoDB access helpers, used by v2 and v3
+  links_authorizer.py   # v2/v3 Lambda authorizer (x-api-key vs. Secrets Manager)
   links_submit.py       # v2: POST /v2/links — queues a request
   links_processor.py    # v2: SQS consumer — resolves the number, stores the result
   links_status.py       # v2: GET /v2/links/{requestId} — polls for the result
+  links_v3_start.py     # v3: POST /v3/links — starts an orchestrated pipeline execution
+  links_v3_validate.py  # v3: Step Functions task — validates/normalizes the number
+  links_v3_resolve.py   # v3: Step Functions task — resolves the number to a wa.me link
+  links_v3_persist.py   # v3: Step Functions task — writes the final outcome
+  links_v3_status.py    # v3: GET /v3/links/{requestId} — polls for the result
+statemachine/
+  links_pipeline.asl.yaml  # v3: Step Functions state machine definition (Amazon States Language)
 tests/
   test_handler.py
   test_phone.py
   test_base62.py
+  test_links_store.py
   test_links_authorizer.py
   test_links_submit.py
   test_links_processor.py
   test_links_status.py
+  test_links_v3_start.py
+  test_links_v3_validate.py
+  test_links_v3_resolve.py
+  test_links_v3_persist.py
+  test_links_v3_status.py
 template.yaml  # AWS SAM infrastructure definition
 ```
 

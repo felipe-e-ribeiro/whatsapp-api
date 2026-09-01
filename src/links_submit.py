@@ -12,9 +12,9 @@ from typing import Any
 
 import boto3
 
+from src import links_store
 from src.base62 import encode
 
-_dynamodb = boto3.resource("dynamodb")
 _sqs = boto3.client("sqs")
 
 _COUNTER_ID = "GLOBAL"
@@ -29,15 +29,12 @@ def _error(status_code: int, message: str) -> dict:
 
 
 def _allocate_request_id() -> str:
-    table = _dynamodb.Table(os.environ["LINKS_COUNTER_TABLE_NAME"])
-    response = table.update_item(
-        Key={"counterId": _COUNTER_ID},
-        UpdateExpression="SET #v = if_not_exists(#v, :start) + :incr",
-        ExpressionAttributeNames={"#v": "value"},
-        ExpressionAttributeValues={":start": _COUNTER_SEED, ":incr": 1},
-        ReturnValues="UPDATED_NEW",
+    counter_value = links_store.increment(
+        "LINKS_COUNTER_TABLE_NAME",
+        {"counterId": _COUNTER_ID},
+        "value",
+        start=_COUNTER_SEED,
     )
-    counter_value = int(response["Attributes"]["value"])
     return encode(counter_value)
 
 
@@ -55,14 +52,14 @@ def lambda_handler(event: dict, context: Any) -> dict:
     request_id = _allocate_request_id()
     requested_at = datetime.now(timezone.utc).isoformat()
 
-    table = _dynamodb.Table(os.environ["LINKS_TABLE_NAME"])
-    table.put_item(
-        Item={
+    links_store.put_item(
+        "LINKS_TABLE_NAME",
+        {
             "requestId": request_id,
             "number": number,
             "status": "pending",
             "requestedAt": requested_at,
-        }
+        },
     )
 
     _sqs.send_message(
