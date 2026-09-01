@@ -121,6 +121,19 @@ Resources:
               Action: secretsmanager:GetSecretValue
               Resource: !Ref LinksApiKeySecret
 
+  # Referenced only via WhatsappHttpApi's Auth.Authorizers block above, not
+  # via an Events: entry on this function — so SAM never auto-generates the
+  # invoke permission the way it does for the other functions' HttpApi
+  # events. Without this, API Gateway gets AccessDenied invoking the
+  # authorizer and returns 500 Internal Server Error on every /v2/* request.
+  LinksAuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LinksAuthorizerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WhatsappHttpApi}/*"
+
   LinksProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:

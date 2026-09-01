@@ -242,6 +242,70 @@ lambda_handler(event, None)
 "
 ```
 
+### Smoke-testing the deployed API
+
+Once the stack is deployed (see [Deploying](#deploying)), the fastest way to
+confirm everything is wired correctly end-to-end — API Gateway, both custom
+domain and default `execute-api` URL, the Lambda authorizer, DynamoDB, and
+SQS — is to hit the real deployed endpoint directly with `curl`, rather than
+`sam local start-api`.
+
+Resolve the domain the same way `template.yaml` does — from the SSM
+parameter — instead of hardcoding it:
+
+```bash
+API_DOMAIN=$(aws ssm get-parameter \
+  --name /infra/route53/domain_whatsapp-api \
+  --query Parameter.Value --output text)
+```
+
+#### v1
+
+No auth required:
+
+```bash
+curl -i "https://$API_DOMAIN/v1/11987654321"
+# 200 {"result": "https://wa.me/5511987654321"}
+```
+
+#### v2
+
+Fetch the real key too (see [Authentication](#authentication) —
+never hardcode it):
+
+```bash
+API_KEY=$(aws secretsmanager get-secret-value \
+  --secret-id <LinksApiKeySecret ARN or name> \
+  --query SecretString --output text | python3 -c "import json,sys; print(json.load(sys.stdin)['apiKey'])")
+```
+
+Submit a number and capture the `requestId` from the response:
+
+```bash
+curl -i -X POST "https://$API_DOMAIN/v2/links" \
+  -H "x-api-key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"number": "11987654321"}'
+# 202 {"requestId": "8k", "status": "pending"}
+```
+
+Poll for the result (the processor drains the queue within seconds, no
+manual step needed):
+
+```bash
+curl -i "https://$API_DOMAIN/v2/links/8k" \
+  -H "x-api-key: $API_KEY"
+# 200 {"requestId": "8k", "status": "pending"}     -- immediately after
+# 200 {"requestId": "8k", "status": "completed", "result": "https://wa.me/5511987654321"}  -- once processed
+```
+
+A missing/wrong key returns `403` before your code ever runs:
+
+```bash
+curl -i "https://$API_DOMAIN/v2/links/8k" -H "x-api-key: wrong"
+# 403 {"message":"User is not authorized to access this resource"}
+```
+
 ## Deploying
 
 Requires the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html).
