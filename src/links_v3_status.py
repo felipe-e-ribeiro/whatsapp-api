@@ -23,10 +23,16 @@ def lambda_handler(event: dict, context: Any) -> dict:
         }
 
     body = {"requestId": item["requestId"], "status": item["status"]}
+    if "createdAt" in item:
+        body["createdAt"] = item["createdAt"]
+    if "updatedAt" in item:
+        body["updatedAt"] = item["updatedAt"]
     if "result" in item:
         body["result"] = item["result"]
     if "attempts" in item:
         body["attempts"] = int(item["attempts"])
+    if "reprocessCount" in item:
+        body["reprocessCount"] = int(item["reprocessCount"])
     if "lastError" in item:
         body["lastError"] = item["lastError"]
 

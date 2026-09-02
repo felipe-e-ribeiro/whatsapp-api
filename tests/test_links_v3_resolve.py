@@ -47,6 +47,7 @@ class TestLambdaHandler:
         assert result == {"result": "https://wa.me/5511987654321"}
         item = aws["table"].get_item(Key={"requestId": "8k"})["Item"]
         assert int(item["attempts"]) == 1
+        assert "updatedAt" in item
 
     def test_simulated_failures_are_retried_then_succeed(self, aws):
         from src.links_v3_resolve import TransientResolutionError, lambda_handler

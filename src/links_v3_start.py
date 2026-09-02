@@ -52,7 +52,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
     simulate_failures = payload.get("simulateFailures") if isinstance(payload, dict) else None
 
     request_id = _idempotency_key(event)
-    requested_at = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     links_store.put_item(
         "LINKS_V3_TABLE_NAME",
@@ -60,7 +60,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
             "requestId": request_id,
             "number": number,
             "status": "pending",
-            "requestedAt": requested_at,
+            "createdAt": now,
+            "updatedAt": now,
         },
         if_not_exists_key="requestId",
     )

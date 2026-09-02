@@ -90,20 +90,14 @@ States:
       QueueUrl: "${DlqUrl}"
       MessageBody.$: "States.JsonToString($)"
     ResultPath: "$.dlq"
-    Next: PersistFailed
-
-  PersistFailed:
-    Type: Task
-    Resource: arn:aws:states:::lambda:invoke
-    Parameters:
-      FunctionName: "${PersistFunctionArn}"
-      Payload:
-        requestId.$: "$.requestId"
-        status: failed
-        lastError.$: "$.error.Cause"
     Next: Fail
 
+  # LinksV3DlqConsumerFunction (SQS-triggered on LinksV3DLQ) is what
+  # actually records status: failed on the request, once the message
+  # above lands in the queue — see src/links_v3_dlq_consumer.py. This
+  # state machine's job ends at sending the message; it does not persist
+  # the failure itself.
   Fail:
     Type: Fail
     Error: PipelineFailed
-    Cause: Resolution failed after exhausting retries; payload sent to the dead-letter queue.
+    Cause: Resolution failed after exhausting retries; payload sent to the dead-letter queue for automatic handling.
