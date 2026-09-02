@@ -6,6 +6,7 @@ test hook — increments a persisted `attempts` counter first, so retry
 evidence is inspectable via `GET /v3/links/{requestId}` alone, not only
 through the Step Functions console/execution history.
 """
+from datetime import datetime, timezone
 from typing import Any
 
 from src import links_store
@@ -26,6 +27,11 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
     attempts = links_store.increment(
         "LINKS_V3_TABLE_NAME", {"requestId": request_id}, "attempts"
+    )
+    links_store.update_item(
+        "LINKS_V3_TABLE_NAME",
+        {"requestId": request_id},
+        {"updatedAt": datetime.now(timezone.utc).isoformat()},
     )
 
     if attempts <= simulate_failures:

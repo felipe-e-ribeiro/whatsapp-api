@@ -318,6 +318,52 @@ Resources:
             Auth:
               Authorizer: LinksApiKeyAuthorizer
 
+  # Consumes LinksV3DLQ automatically: records status: failed on the
+  # request and, by returning without raising, lets Lambda's SQS event
+  # source delete the message — the dead-letter queue is meant to drain
+  # itself via this handler, not accumulate messages for manual review.
+  LinksV3DlqConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_v3_dlq_consumer.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          LINKS_V3_TABLE_NAME: !Ref LinksV3Table
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksV3Table
+      Events:
+        ConsumeLinksV3DLQ:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LinksV3DLQ.Arn
+            BatchSize: 1
+
+  LinksV3ReprocessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src.links_v3_reprocess.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          LINKS_V3_TABLE_NAME: !Ref LinksV3Table
+          LINKS_V3_STATE_MACHINE_ARN: !Ref LinksV3StateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksV3Table
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt LinksV3StateMachine.Name
+      Events:
+        ReprocessLinkV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WhatsappHttpApi
+            Path: /v3/links/{requestId}/reprocess
+            Method: POST
+            Auth:
+              Authorizer: LinksApiKeyAuthorizer
+
   ApiCustomDomain:
     Type: AWS::ApiGatewayV2::DomainName
     Properties:

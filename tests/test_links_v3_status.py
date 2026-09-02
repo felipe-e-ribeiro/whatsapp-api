@@ -68,6 +68,27 @@ class TestLambdaHandler:
             "attempts": 1,
         }
 
+    def test_includes_timestamps_and_reprocess_count_when_present(self, aws):
+        from src.links_v3_status import lambda_handler
+
+        aws["links_table"].put_item(
+            Item={
+                "requestId": "8k",
+                "status": "completed",
+                "result": "https://wa.me/5511987654321",
+                "createdAt": "2026-09-01T00:00:00+00:00",
+                "updatedAt": "2026-09-01T00:00:05+00:00",
+                "reprocessCount": 1,
+            }
+        )
+
+        response = lambda_handler(_event("8k"), None)
+
+        body = json.loads(response["body"])
+        assert body["createdAt"] == "2026-09-01T00:00:00+00:00"
+        assert body["updatedAt"] == "2026-09-01T00:00:05+00:00"
+        assert body["reprocessCount"] == 1
+
     def test_invalid_request_has_no_result(self, aws):
         from src.links_v3_status import lambda_handler
 

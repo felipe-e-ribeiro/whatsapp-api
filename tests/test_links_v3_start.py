@@ -76,6 +76,17 @@ class TestLambdaHandler:
         assert item["status"] == "pending"
         assert item["number"] == "11987654321"
 
+    def test_submission_records_created_and_updated_timestamps(self, aws):
+        from src.links_v3_start import lambda_handler
+
+        response = lambda_handler(_event({"number": "11987654321"}), None)
+        request_id = json.loads(response["body"])["requestId"]
+
+        item = aws["links_table"].get_item(Key={"requestId": request_id})["Item"]
+        assert "createdAt" in item
+        assert "updatedAt" in item
+        assert item["createdAt"] == item["updatedAt"]
+
     def test_submission_starts_an_execution(self, aws):
         from src.links_v3_start import lambda_handler
 

@@ -100,6 +100,34 @@ class TestUpdateItem:
         item = aws["table"].get_item(Key={"requestId": "8k"})["Item"]
         assert item["status"] == "completed"
 
+    def test_can_remove_attributes_while_setting_others(self, aws):
+        from src.links_store import update_item
+
+        aws["table"].put_item(
+            Item={"requestId": "8k", "status": "failed", "lastError": "boom"}
+        )
+
+        update_item(
+            "TEST_TABLE_NAME",
+            {"requestId": "8k"},
+            {"status": "completed"},
+            remove=["lastError"],
+        )
+
+        item = aws["table"].get_item(Key={"requestId": "8k"})["Item"]
+        assert item["status"] == "completed"
+        assert "lastError" not in item
+
+    def test_removing_an_absent_attribute_is_a_no_op(self, aws):
+        from src.links_store import update_item
+
+        aws["table"].put_item(Item={"requestId": "8k", "status": "pending"})
+
+        update_item("TEST_TABLE_NAME", {"requestId": "8k"}, remove=["lastError"])
+
+        item = aws["table"].get_item(Key={"requestId": "8k"})["Item"]
+        assert item["status"] == "pending"
+
 
 class TestIncrement:
     def test_starts_at_given_value(self, aws):
