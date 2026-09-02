@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 .venv/
 
+docs/
+
 # Test / coverage
 .pytest_cache/
 .coverage

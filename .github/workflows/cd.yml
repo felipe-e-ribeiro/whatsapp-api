@@ -6,10 +6,6 @@ on:
       - "v*"
   workflow_dispatch:
 
-env:
-  AWS_REGION: us-east-1
-  STACK_NAME: whatsapp-api
-
 permissions:
   contents: write
 
@@ -17,6 +13,14 @@ jobs:
   deploy:
     name: Build & deploy to AWS
     runs-on: ubuntu-latest
+    env:
+      # Sourced from a repo secret rather than pinned here: this is a
+      # public repo and there's no reason for the workflow file to say
+      # which region the stack actually deploys to. (The workflow-level
+      # `env:` key can't see `secrets` at all - GitHub silently resolves it
+      # to an empty string there - so this has to live at job level.)
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      STACK_NAME: whatsapp-api
     steps:
       - uses: actions/checkout@v4
 
@@ -64,27 +68,13 @@ jobs:
             --output text 2>/dev/null) || true
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch deployed API URL
-        id: api_url
-        if: always()
-        run: |
-          URL=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='WhatsappLinkCustomDomainUrl'].OutputValue" \
-            --output text 2>/dev/null) || true
-          HOST="${URL#https://}"
-          HOST="${HOST%%/*}"
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-
-      # Always rewrites the same two badge lines in place (never appends),
-      # so the README never accumulates stale status history or extra
-      # noisy commits. Runs even if sam deploy failed, so the
+      # Always rewrites the CloudFormation badge line in place (never
+      # appends), so the README never accumulates stale status history or
+      # extra noisy commits. Runs even if sam deploy failed, so the
       # CloudFormation badge always reflects the latest attempt.
       - name: Update README status badges
         if: always()
         env:
-          HOST: ${{ steps.api_url.outputs.host }}
           CFN_STATUS: ${{ steps.cfn_status.outputs.status }}
           DEPLOY_OUTCOME: ${{ steps.sam_deploy.outcome }}
         run: |
@@ -92,12 +82,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout -B main origin/main
-
-          if [ -n "$HOST" ]; then
-            BADGE_HOST=$(echo "$HOST" | sed 's/-/--/g')
-            API_LINE="[![API](https://img.shields.io/badge/API-${BADGE_HOST}-brightgreen)](https://${HOST})"
-            API_LINE="$API_LINE" perl -pi -e 's/^\[!\[API\].*/$ENV{API_LINE}/' README.md
-          fi
 
           # sam deploy's own exit code is the primary signal: a failure
           # there (e.g. an IAM AccessDenied before any changeset ever
