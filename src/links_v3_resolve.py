@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src import links_store
+from src.observability import emit_metric, get_logger, log_event
 from src.phone import build_whatsapp_url
+
+_logger = get_logger(__name__)
 
 
 class TransientResolutionError(Exception):
@@ -44,7 +47,25 @@ def lambda_handler(event: dict, context: Any) -> dict:
             {"requestId": request_id},
             {"lastError": error_message},
         )
+        log_event(
+            _logger,
+            "resolution attempt failed",
+            level="WARNING",
+            step="resolve",
+            outcome="retry",
+            requestId=request_id,
+            attempts=attempts,
+        )
+        emit_metric("LinksV3ResolveRetried", requestId=request_id, attempts=attempts)
         raise TransientResolutionError(error_message)
 
     digits = event["validation"]["Payload"]["digits"]
+    log_event(
+        _logger,
+        "number resolved",
+        step="resolve",
+        outcome="resolved",
+        requestId=request_id,
+        attempts=attempts,
+    )
     return {"result": build_whatsapp_url(digits)}

@@ -9,11 +9,27 @@ a caught exception.
 """
 from typing import Any
 
+from src.observability import emit_metric, get_logger, log_event, mask_phone_number
 from src.phone import is_valid_br_number, normalize, strip_country_code
+
+_logger = get_logger(__name__)
 
 
 def lambda_handler(event: dict, context: Any) -> dict:
+    request_id = event.get("requestId") or ""
     number = event.get("number") or ""
     digits = strip_country_code(normalize(number))
     valid = is_valid_br_number(digits)
+
+    outcome = "valid" if valid else "invalid"
+    log_event(
+        _logger,
+        "number validated",
+        step="validate",
+        outcome=outcome,
+        requestId=request_id,
+        number=mask_phone_number(number),
+    )
+    emit_metric("LinksV3Validated", dimensions={"Outcome": outcome}, requestId=request_id)
+
     return {"valid": valid, "digits": digits if valid else None}

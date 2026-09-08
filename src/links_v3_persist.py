@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src import links_store
+from src.observability import emit_metric, get_logger, log_event
+
+_logger = get_logger(__name__)
 
 
 def lambda_handler(event: dict, context: Any) -> dict:
@@ -32,5 +35,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
         values,
         remove=["lastError"],
     )
+
+    log_event(_logger, "pipeline outcome persisted", step="persist", outcome=status, requestId=request_id)
+    emit_metric("LinksV3Outcome", dimensions={"Status": status}, requestId=request_id)
 
     return {"requestId": request_id, "status": status}

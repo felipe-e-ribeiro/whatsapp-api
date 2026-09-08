@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src import links_store
+from src.observability import emit_metric, get_logger, log_event
+
+_logger = get_logger(__name__)
 
 
 def _process_record(record: dict) -> None:
@@ -34,6 +37,17 @@ def _process_record(record: dict) -> None:
             "updatedAt": now,
         },
     )
+
+    log_event(
+        _logger,
+        "dead-lettered execution recorded as failed",
+        level="ERROR",
+        step="dlq_consume",
+        outcome="failed",
+        requestId=request_id,
+        lastError=last_error,
+    )
+    emit_metric("LinksV3Outcome", dimensions={"Status": "failed"}, requestId=request_id)
 
 
 def lambda_handler(event: dict, context: Any) -> None:
