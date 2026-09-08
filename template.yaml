@@ -535,7 +535,7 @@ Resources:
             {
               "type": "metric", "x": 0, "y": 0, "width": 24, "height": 8,
               "properties": {
-                "title": "Lambda invocations (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "title": "Lambda invocations (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
                   [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksAuthorizerFunction" ],
@@ -555,7 +555,7 @@ Resources:
             {
               "type": "metric", "x": 0, "y": 8, "width": 24, "height": 8,
               "properties": {
-                "title": "Lambda errors (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "title": "Lambda errors (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
                   [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksAuthorizerFunction" ],
@@ -575,7 +575,7 @@ Resources:
             {
               "type": "metric", "x": 0, "y": 16, "width": 12, "height": 8,
               "properties": {
-                "title": "p95 duration (ms)", "stat": "p95", "period": 300, "view": "timeSeries",
+                "title": "p95 duration (ms)", "stat": "p95", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
                   [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksSubmitFunction" ],
@@ -589,7 +589,7 @@ Resources:
             {
               "type": "metric", "x": 12, "y": 16, "width": 12, "height": 8,
               "properties": {
-                "title": "Step Functions executions (v3 pipeline)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "title": "Step Functions executions (v3 pipeline)", "stat": "Sum", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "AWS/States", "ExecutionsStarted", "StateMachineArn", "${LinksV3StateMachine.Arn}" ],
                   [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "${LinksV3StateMachine.Arn}" ],
@@ -601,7 +601,7 @@ Resources:
             {
               "type": "metric", "x": 0, "y": 24, "width": 12, "height": 8,
               "properties": {
-                "title": "Pipeline outcomes (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "title": "Pipeline outcomes (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "WhatsappLinkApi", "LinksV3Outcome", "Status", "completed" ],
                   [ "WhatsappLinkApi", "LinksV3Outcome", "Status", "invalid" ],
@@ -616,7 +616,7 @@ Resources:
             {
               "type": "metric", "x": 12, "y": 24, "width": 12, "height": 8,
               "properties": {
-                "title": "Submissions, rejections, retries & auth denials (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "title": "Submissions, rejections, retries & auth denials (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries", "region": "${AWS::Region}",
                 "metrics": [
                   [ "WhatsappLinkApi", "LinksSubmitted", "Version", "v2" ],
                   [ "WhatsappLinkApi", "LinksSubmitted", "Version", "v3" ],
