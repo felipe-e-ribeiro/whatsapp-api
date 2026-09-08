@@ -17,6 +17,14 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<String>
     Default: "/infra/route53/domain_whatsapp-api"
     Description: "Domínio customizado da API do WhatsApp"
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    Description: >
+      Retenção (em dias) dos CloudWatch Logs de cada função Lambda e da
+      state machine. Sem isso, o LogGroup padrão do Lambda fica como
+      "Never Expire" e o armazenamento cresce indefinidamente — este
+      parâmetro é uma das otimizações de custo documentadas no README.
 
 Globals:
   Function:
@@ -25,11 +33,21 @@ Globals:
     Runtime: python3.12
     Architectures:
       - arm64
+    # X-Ray: tracing distribuído ponta a ponta (submit -> state machine ->
+    # validate/resolve/persist) a custo ~zero para o volume deste projeto
+    # (free tier: 100k traces/mês).
+    Tracing: Active
+    # Faz o CloudWatch reconhecer nativamente as linhas JSON que cada
+    # função já emite (logs estruturados via src/observability.py e
+    # métricas EMF) como entradas estruturadas, sem custo adicional.
+    LoggingConfig:
+      LogFormat: JSON
 
 Resources:
   WhatsappLinkFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-WhatsappLinkFunction"
       Handler: src.handler.lambda_handler
       CodeUri: .
       Events:
@@ -39,6 +57,20 @@ Resources:
             ApiId: !Ref WhatsappHttpApi
             Path: /v1/{number}
             Method: GET
+
+  # Every Lambda function below gets a matching, explicitly-named
+  # AWS::Logs::LogGroup (FunctionName + "/aws/lambda/<FunctionName>" log
+  # group, RetentionInDays: LogRetentionDays). Lambda creates a log group
+  # lazily on first invoke if none exists yet, and reuses one that's
+  # already there — pre-creating it via CloudFormation, with a finite
+  # retention, is what keeps CloudWatch Logs storage from growing forever
+  # (the platform default is "Never Expire"). This is the first of the
+  # cost optimizations documented in the README's observability section.
+  WhatsappLinkFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-WhatsappLinkFunction"
+      RetentionInDays: !Ref LogRetentionDays
 
   # Explicit HttpApi (every function event below references it via ApiId)
   # so we can register the v2 Lambda authorizer on it. Deliberately not
@@ -110,6 +142,7 @@ Resources:
   LinksAuthorizerFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksAuthorizerFunction"
       Handler: src.links_authorizer.lambda_handler
       CodeUri: .
       Environment:
@@ -120,6 +153,12 @@ Resources:
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
               Resource: !Ref LinksApiKeySecret
+
+  LinksAuthorizerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksAuthorizerFunction"
+      RetentionInDays: !Ref LogRetentionDays
 
   # Referenced only via WhatsappHttpApi's Auth.Authorizers block above, not
   # via an Events: entry on this function — so SAM never auto-generates the
@@ -137,6 +176,7 @@ Resources:
   LinksProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksProcessorFunction"
       Handler: src.links_processor.lambda_handler
       CodeUri: .
       Environment:
@@ -152,9 +192,16 @@ Resources:
             Queue: !GetAtt LinksQueue.Arn
             BatchSize: 1
 
+  LinksProcessorFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksProcessorFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   LinksSubmitFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksSubmitFunction"
       Handler: src.links_submit.lambda_handler
       CodeUri: .
       Environment:
@@ -179,9 +226,16 @@ Resources:
             Auth:
               Authorizer: LinksApiKeyAuthorizer
 
+  LinksSubmitFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksSubmitFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   LinksStatusFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksStatusFunction"
       Handler: src.links_status.lambda_handler
       CodeUri: .
       Environment:
@@ -199,6 +253,12 @@ Resources:
             Method: GET
             Auth:
               Authorizer: LinksApiKeyAuthorizer
+
+  LinksStatusFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksStatusFunction"
+      RetentionInDays: !Ref LogRetentionDays
 
   # --- v3 (Step Functions orchestration) storage, DLQ, and pipeline ---
   # Parallel to v1/v2: no v1/v2 resource above is modified or reused here
@@ -222,12 +282,20 @@ Resources:
   LinksV3ValidateFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3ValidateFunction"
       Handler: src.links_v3_validate.lambda_handler
       CodeUri: .
+
+  LinksV3ValidateFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3ValidateFunction"
+      RetentionInDays: !Ref LogRetentionDays
 
   LinksV3ResolveFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3ResolveFunction"
       Handler: src.links_v3_resolve.lambda_handler
       CodeUri: .
       Environment:
@@ -237,9 +305,16 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref LinksV3Table
 
+  LinksV3ResolveFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3ResolveFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   LinksV3PersistFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3PersistFunction"
       Handler: src.links_v3_persist.lambda_handler
       CodeUri: .
       Environment:
@@ -248,6 +323,22 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref LinksV3Table
+
+  LinksV3PersistFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3PersistFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # Receives every state transition of every execution (Level: ALL) plus
+  # the input/output of each state (IncludeExecutionData: true) — this is
+  # what lets you inspect a run in CloudWatch Logs Insights instead of
+  # only through the Step Functions console's execution history.
+  LinksV3StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${AWS::StackName}-LinksV3StateMachine"
+      RetentionInDays: !Ref LogRetentionDays
 
   # AWS::Serverless::StateMachine's DefinitionUri isn't parsed by SAM, so it
   # can't auto-detect which Lambdas the state machine calls the way it does
@@ -263,6 +354,18 @@ Resources:
         ResolveFunctionArn: !GetAtt LinksV3ResolveFunction.Arn
         PersistFunctionArn: !GetAtt LinksV3PersistFunction.Arn
         DlqUrl: !Ref LinksV3DLQ
+      # Cheap relative to the Lambda/DynamoDB calls it orchestrates:
+      # Standard Workflows are billed per state transition, independent of
+      # this tracing/logging config. See the README's cost analysis for
+      # when STANDARD vs. EXPRESS actually matters for this pipeline.
+      Tracing:
+        Enabled: true
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt LinksV3StateMachineLogGroup.Arn
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref LinksV3ValidateFunction
@@ -272,10 +375,26 @@ Resources:
             FunctionName: !Ref LinksV3PersistFunction
         - SQSSendMessagePolicy:
             QueueName: !GetAtt LinksV3DLQ.QueueName
+        # Step Functions' CloudWatch Logs delivery API (logs:CreateLogDelivery
+        # and friends) doesn't support resource-level restriction — this is
+        # the exact minimum set AWS documents for state machine logging.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
 
   LinksV3StartFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3StartFunction"
       Handler: src.links_v3_start.lambda_handler
       CodeUri: .
       Environment:
@@ -297,9 +416,16 @@ Resources:
             Auth:
               Authorizer: LinksApiKeyAuthorizer
 
+  LinksV3StartFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3StartFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   LinksV3StatusFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3StatusFunction"
       Handler: src.links_v3_status.lambda_handler
       CodeUri: .
       Environment:
@@ -318,6 +444,12 @@ Resources:
             Auth:
               Authorizer: LinksApiKeyAuthorizer
 
+  LinksV3StatusFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3StatusFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   # Consumes LinksV3DLQ automatically: records status: failed on the
   # request and, by returning without raising, lets Lambda's SQS event
   # source delete the message — the dead-letter queue is meant to drain
@@ -325,6 +457,7 @@ Resources:
   LinksV3DlqConsumerFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3DlqConsumerFunction"
       Handler: src.links_v3_dlq_consumer.lambda_handler
       CodeUri: .
       Environment:
@@ -340,9 +473,16 @@ Resources:
             Queue: !GetAtt LinksV3DLQ.Arn
             BatchSize: 1
 
+  LinksV3DlqConsumerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3DlqConsumerFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
   LinksV3ReprocessFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-LinksV3ReprocessFunction"
       Handler: src.links_v3_reprocess.lambda_handler
       CodeUri: .
       Environment:
@@ -363,6 +503,123 @@ Resources:
             Method: POST
             Auth:
               Authorizer: LinksApiKeyAuthorizer
+
+  LinksV3ReprocessFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LinksV3ReprocessFunction"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # Single dashboard combining Lambda's own built-in metrics (free,
+  # automatic) with the custom business metrics each function emits via
+  # CloudWatch Embedded Metric Format (src/observability.py::emit_metric)
+  # and Step Functions' native execution metrics. The first 3 dashboards
+  # per account are free — see the README's cost analysis.
+  ObservabilityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-observability"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 24, "height": 8,
+              "properties": {
+                "title": "Lambda invocations (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksAuthorizerFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksSubmitFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksStatusFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksProcessorFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3StartFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3StatusFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3ValidateFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3ResolveFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3PersistFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3DlqConsumerFunction" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${AWS::StackName}-LinksV3ReprocessFunction" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 8, "width": 24, "height": 8,
+              "properties": {
+                "title": "Lambda errors (Sum)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksAuthorizerFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksSubmitFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksStatusFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksProcessorFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3StartFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3StatusFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3ValidateFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3ResolveFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3PersistFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3DlqConsumerFunction" ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${AWS::StackName}-LinksV3ReprocessFunction" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 16, "width": 12, "height": 8,
+              "properties": {
+                "title": "p95 duration (ms)", "stat": "p95", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-WhatsappLinkFunction" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksSubmitFunction" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksProcessorFunction" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksV3StartFunction" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksV3ResolveFunction" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${AWS::StackName}-LinksV3PersistFunction" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 16, "width": 12, "height": 8,
+              "properties": {
+                "title": "Step Functions executions (v3 pipeline)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/States", "ExecutionsStarted", "StateMachineArn", "${LinksV3StateMachine.Arn}" ],
+                  [ "AWS/States", "ExecutionsSucceeded", "StateMachineArn", "${LinksV3StateMachine.Arn}" ],
+                  [ "AWS/States", "ExecutionsFailed", "StateMachineArn", "${LinksV3StateMachine.Arn}" ],
+                  [ "AWS/States", "ExecutionsTimedOut", "StateMachineArn", "${LinksV3StateMachine.Arn}" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 24, "width": 12, "height": 8,
+              "properties": {
+                "title": "Pipeline outcomes (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "WhatsappLinkApi", "LinksV3Outcome", "Status", "completed" ],
+                  [ "WhatsappLinkApi", "LinksV3Outcome", "Status", "invalid" ],
+                  [ "WhatsappLinkApi", "LinksV3Outcome", "Status", "failed" ],
+                  [ "WhatsappLinkApi", "LinksV1Resolved", "Outcome", "valid" ],
+                  [ "WhatsappLinkApi", "LinksV1Resolved", "Outcome", "invalid" ],
+                  [ "WhatsappLinkApi", "LinksProcessed", "Result", "valid" ],
+                  [ "WhatsappLinkApi", "LinksProcessed", "Result", "invalid" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 24, "width": 12, "height": 8,
+              "properties": {
+                "title": "Submissions, rejections, retries & auth denials (custom EMF metrics)", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "WhatsappLinkApi", "LinksSubmitted", "Version", "v2" ],
+                  [ "WhatsappLinkApi", "LinksSubmitted", "Version", "v3" ],
+                  [ "WhatsappLinkApi", "LinksRejected", "Version", "v2" ],
+                  [ "WhatsappLinkApi", "LinksRejected", "Version", "v3" ],
+                  [ "WhatsappLinkApi", "LinksV3ResolveRetried" ],
+                  [ "WhatsappLinkApi", "LinksV3Reprocessed" ],
+                  [ "WhatsappLinkApi", "AuthorizationDenied" ]
+                ]
+              }
+            }
+          ]
+        }
 
   ApiCustomDomain:
     Type: AWS::ApiGatewayV2::DomainName
@@ -396,3 +653,6 @@ Outputs:
   WhatsappLinkCustomDomainUrl:
     Description: Base URL for the WhatsApp link API (custom domain)
     Value: !Sub "https://${DomainName}/v1/{number}"
+  ObservabilityDashboardUrl:
+    Description: CloudWatch dashboard combining built-in Lambda/Step Functions metrics with this project's custom EMF metrics
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ObservabilityDashboard}"

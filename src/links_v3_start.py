@@ -18,8 +18,10 @@ import boto3
 from botocore.exceptions import ClientError
 
 from src import links_store
+from src.observability import emit_metric, get_logger, log_event, mask_phone_number
 
 _sfn = boto3.client("stepfunctions")
+_logger = get_logger(__name__)
 
 
 def _error(status_code: int, message: str) -> dict:
@@ -43,10 +45,14 @@ def lambda_handler(event: dict, context: Any) -> dict:
     try:
         payload = json.loads(raw_body)
     except (TypeError, ValueError):
+        log_event(_logger, "start rejected", level="WARNING", step="start", outcome="rejected", reason="invalid_json")
+        emit_metric("LinksRejected", dimensions={"Version": "v3"})
         return _error(400, "Request body must be valid JSON")
 
     number = payload.get("number") if isinstance(payload, dict) else None
     if not isinstance(number, str):
+        log_event(_logger, "start rejected", level="WARNING", step="start", outcome="rejected", reason="missing_number")
+        emit_metric("LinksRejected", dimensions={"Version": "v3"})
         return _error(400, "'number' is required and must be a string")
 
     simulate_failures = payload.get("simulateFailures") if isinstance(payload, dict) else None
@@ -70,6 +76,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
     if simulate_failures is not None:
         execution_input["simulateFailures"] = simulate_failures
 
+    replayed = False
     try:
         _sfn.start_execution(
             stateMachineArn=os.environ["LINKS_V3_STATE_MACHINE_ARN"],
@@ -82,6 +89,18 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # error, so the client just gets the same requestId back.
         if exc.response["Error"]["Code"] != "ExecutionAlreadyExists":
             raise
+        replayed = True
+
+    log_event(
+        _logger,
+        "pipeline execution started",
+        step="start",
+        outcome="replayed" if replayed else "accepted",
+        requestId=request_id,
+        number=mask_phone_number(number),
+    )
+    if not replayed:
+        emit_metric("LinksSubmitted", dimensions={"Version": "v3"}, requestId=request_id)
 
     return {
         "statusCode": 202,

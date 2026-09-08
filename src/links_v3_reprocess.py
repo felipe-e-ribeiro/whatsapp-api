@@ -26,8 +26,10 @@ from typing import Any
 import boto3
 
 from src import links_store
+from src.observability import emit_metric, get_logger, log_event
 
 _sfn = boto3.client("stepfunctions")
+_logger = get_logger(__name__)
 
 
 def _error(status_code: int, message: str) -> dict:
@@ -43,9 +45,20 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
     item = links_store.get_item("LINKS_V3_TABLE_NAME", {"requestId": request_id})
     if item is None:
+        log_event(_logger, "reprocess rejected", level="WARNING", step="reprocess", outcome="rejected", reason="not_found", requestId=request_id)
         return _error(404, "requestId not found")
 
     if item.get("status") != "failed":
+        log_event(
+            _logger,
+            "reprocess rejected",
+            level="WARNING",
+            step="reprocess",
+            outcome="rejected",
+            reason="invalid_status",
+            requestId=request_id,
+            status=item.get("status"),
+        )
         return _error(
             409,
             f"requestId '{request_id}' has status '{item.get('status')}'; "
@@ -69,6 +82,16 @@ def lambda_handler(event: dict, context: Any) -> dict:
         name=f"{request_id}-r{reprocess_count}",
         input=json.dumps(execution_input),
     )
+
+    log_event(
+        _logger,
+        "pipeline execution re-started",
+        step="reprocess",
+        outcome="accepted",
+        requestId=request_id,
+        reprocessCount=reprocess_count,
+    )
+    emit_metric("LinksV3Reprocessed", requestId=request_id, reprocessCount=reprocess_count)
 
     return {
         "statusCode": 202,

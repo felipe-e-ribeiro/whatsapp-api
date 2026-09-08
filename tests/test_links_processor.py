@@ -68,3 +68,28 @@ class TestLambdaHandler:
 
         with pytest.raises(Exception):
             lambda_handler({"Records": [{"body": "not json"}]}, None)
+
+    def test_downstream_failure_is_logged_then_reraised(self, aws, monkeypatch, capsys):
+        from src.links_processor import lambda_handler
+
+        # A table name that doesn't exist makes links_store.update_item's
+        # DynamoDB call fail with a ClientError, exercising the except
+        # branch: the failure must be logged with full context *and*
+        # still propagate, so SQS redelivers the message.
+        monkeypatch.setenv("LINKS_TABLE_NAME", "does-not-exist")
+
+        with pytest.raises(Exception):
+            lambda_handler(
+                _sqs_event({"requestId": "8k", "number": "11987654321"}), None
+            )
+
+        log_lines = [
+            json.loads(line)
+            for line in capsys.readouterr().out.strip().splitlines()
+            if line.strip()
+        ]
+        failure_logs = [line for line in log_lines if line.get("level") == "ERROR"]
+        assert len(failure_logs) == 1
+        assert failure_logs[0]["requestId"] == "8k"
+        assert failure_logs[0]["number"] == "*******4321"
+        assert "error" in failure_logs[0]

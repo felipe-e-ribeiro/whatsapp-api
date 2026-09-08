@@ -12,7 +12,10 @@ from typing import Any, Optional
 
 import boto3
 
+from src.observability import emit_metric, get_logger, log_event
+
 _secrets_client = boto3.client("secretsmanager")
+_logger = get_logger(__name__)
 
 # Cached across warm invocations of the same execution environment, so we
 # don't call Secrets Manager on every request.
@@ -37,5 +40,21 @@ def lambda_handler(event: dict, context: Any) -> dict:
     provided_key = headers.get("x-api-key")
 
     is_authorized = bool(provided_key) and provided_key == _get_expected_api_key()
+
+    # Never log the key itself (provided or expected) — only whether one
+    # was supplied and whether it matched.
+    if is_authorized:
+        log_event(_logger, "request authorized", step="authorize", outcome="authorized")
+    else:
+        log_event(
+            _logger,
+            "request denied",
+            level="WARNING",
+            step="authorize",
+            outcome="denied",
+            keyProvided=bool(provided_key),
+            path=event.get("rawPath"),
+        )
+        emit_metric("AuthorizationDenied")
 
     return {"isAuthorized": is_authorized}

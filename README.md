@@ -334,6 +334,7 @@ src/
   phone.py              # pure validation/formatting logic (no AWS deps), shared by v1/v2/v3
   base62.py             # pure base62 encoding, used for v2 request IDs
   links_store.py        # shared DynamoDB access helpers, used by v2 and v3
+  observability.py       # structured JSON logging + CloudWatch EMF metrics, used by every handler
   links_authorizer.py   # v2/v3 Lambda authorizer (x-api-key vs. Secrets Manager)
   links_submit.py       # v2: POST /v2/links — queues a request
   links_processor.py    # v2: SQS consumer — resolves the number, stores the result
@@ -352,6 +353,7 @@ tests/
   test_phone.py
   test_base62.py
   test_links_store.py
+  test_observability.py
   test_links_authorizer.py
   test_links_submit.py
   test_links_processor.py
@@ -663,4 +665,170 @@ To tear down the stack:
 ```bash
 sam delete
 ```
+
+## Observability
+
+Every Lambda handler (v1, v2, and v3) is instrumented with structured
+logging and custom metrics through `src/observability.py` — a small,
+stdlib-only module (no `aws-lambda-powertools` or similar dependency,
+matching the "standard library only" policy already stated in
+`requirements.txt`). Nothing here needs a server, an agent, or a
+`/metrics` endpoint: there's no process running continuously to scrape in
+a serverless architecture, so everything below is push-based, native to
+AWS, and ships as part of the normal Lambda/Step Functions execution.
+
+### Structured logs
+
+`get_logger`/`log_event` emit one JSON object per log line — `message`
+plus arbitrary fields (`requestId`, `step`, `outcome`, `durationMs`, ...)
+as top-level keys instead of interpolated text. Lambda ships stdout to
+CloudWatch Logs automatically, so this needs no extra wiring. It makes
+each field independently queryable in **CloudWatch Logs Insights**, e.g.:
+
+```
+fields @timestamp, step, outcome, requestId, durationMs
+| filter step = "resolve" and outcome = "retry"
+| sort @timestamp desc
+```
+
+```
+fields @timestamp, message, requestId, lastError
+| filter level = "ERROR"
+| sort @timestamp desc
+```
+
+Phone numbers are masked down to the last 4 digits (`mask_phone_number`)
+before ever reaching a log or metric line — logs are comparatively
+low-friction to read next to the DynamoDB record itself, so the full
+number has no business appearing there.
+
+> 📸 **Evidência:** print do console do CloudWatch Logs Insights rodando
+> uma das queries acima contra o log group de uma das funções (ex.:
+> `/aws/lambda/<stack>-LinksV3ResolveFunction`), mostrando pelo menos um
+> evento de `outcome: "retry"` e um de `outcome: "resolved"`. Salvar em
+> `evidence/observability/logs-insights.png` e referenciar aqui.
+
+### Custom metrics (CloudWatch Embedded Metric Format)
+
+`emit_metric` writes one CloudWatch **Embedded Metric Format (EMF)** JSON
+line per metric. CloudWatch Logs recognizes the `_aws` envelope and turns
+it into a real custom metric on its own — **no `PutMetricData` API call**,
+so no added latency and no IAM permission needed for metrics (unlike
+X-Ray, which does need `xray:PutTraceSegments`; SAM adds that
+automatically via `Tracing: Active`).
+
+Metrics emitted, all under the `WhatsappLinkApi` namespace:
+
+| Metric | Dimensions | Emitted by |
+|---|---|---|
+| `LinksV1Resolved` | `Outcome` (valid/invalid) | `handler.py` |
+| `LinksSubmitted` | `Version` (v2/v3) | `links_submit.py`, `links_v3_start.py` |
+| `LinksRejected` | `Version` (v2/v3) | `links_submit.py`, `links_v3_start.py` |
+| `LinksProcessed` | `Result` (valid/invalid) | `links_processor.py` |
+| `LinksV3Validated` | `Outcome` (valid/invalid) | `links_v3_validate.py` |
+| `LinksV3ResolveRetried` | — | `links_v3_resolve.py` |
+| `LinksV3Outcome` | `Status` (completed/invalid/failed) | `links_v3_persist.py`, `links_v3_dlq_consumer.py` |
+| `LinksV3Reprocessed` | — | `links_v3_reprocess.py` |
+| `AuthorizationDenied` | — | `links_authorizer.py` |
+
+A single `AWS::CloudWatch::Dashboard` (`ObservabilityDashboard` in
+`template.yaml`) combines these with Lambda's own built-in metrics
+(Invocations/Errors/Duration, free and automatic) and Step Functions'
+native execution metrics (`ExecutionsStarted/Succeeded/Failed`). Its URL
+is a stack output (`ObservabilityDashboardUrl`):
+
+```bash
+aws cloudformation describe-stacks --stack-name <stack> \
+  --query "Stacks[0].Outputs[?OutputKey=='ObservabilityDashboardUrl'].OutputValue" --output text
+```
+
+> 📸 **Evidência:** print do dashboard completo (os 6 widgets) depois de
+> gerar algum tráfego real contra a API (alguns `POST /v3/links` válidos,
+> um inválido, e pelo menos um com `simulateFailures` para aparecer
+> retry/falha — ver [Demonstrating retry and the dead-letter
+> queue](#demonstrating-retry-and-the-dead-letter-queue)). Salvar em
+> `evidence/observability/dashboard.png`.
+
+### Distributed tracing (X-Ray)
+
+`Tracing: Active` on every function (set once, in `Globals.Function`) and
+`Tracing.Enabled: true` on `LinksV3StateMachine` give a single trace per
+request across the whole v3 pipeline: `LinksV3StartFunction` →
+`LinksV3StateMachine` → `Validate`/`Resolve`/`Persist`. Free tier covers
+100k traces/month — far above this project's traffic.
+
+> 📸 **Evidência:** print do **X-Ray Trace Map** (console AWS → X-Ray →
+> Traces) mostrando a cadeia completa de um request v3 de ponta a ponta.
+> Salvar em `evidence/observability/xray-trace-map.png`.
+
+### Cost analysis
+
+Everything above stays inside AWS's always-free tier for this project's
+traffic volume:
+
+| Resource | Free tier | This project's usage |
+|---|---|---|
+| CloudWatch Logs ingestion + storage | 5 GB/month each | Well under, at this request volume |
+| CloudWatch custom metrics | First 10 metrics free, then ~US$0.30/metric/month | 9 metric **names**, but several carry 2-3 dimension values each (e.g. `LinksV3Outcome` × 3 `Status` values = 3 distinct metric streams) — realistically ~15-18 streams, so a few dollars/month beyond the free 10 once deployed long enough to accumulate data points. Trimming dimensions (e.g. dropping `Result`/`Outcome` splits) is the lever if this needs to shrink further. |
+| X-Ray traces | 100k traces/month | Negligible for a course project |
+| CloudWatch Dashboards | First 3 free | 1 dashboard used |
+| CloudWatch Logs Insights queries | Pay per GB scanned (no separate minimum) | Cents, run on demand only |
+
+**Bottom line:** ~US$0 to a few dollars/month at most, driven almost
+entirely by custom-metric stream count, not by log volume or the
+dashboard/tracing itself.
+
+## Otimizações técnicas propostas
+
+Instrumentar o pipeline (acima) é o que torna estas três otimizações
+verificáveis com dados reais, em vez de especulação:
+
+### 1. CloudWatch Logs retention explícito (implementado)
+
+**Problema:** o LogGroup padrão que o Lambda cria na primeira invocação
+fica configurado como "Never Expire" — o armazenamento de logs cresce
+indefinidamente e nunca é cobrado uma vez, mas sim todo mês, para sempre.
+**Solução:** cada uma das 12 funções e a state machine agora tem um
+`AWS::Logs::LogGroup` explícito com `RetentionInDays: !Ref
+LogRetentionDays` (default 7 dias, parametrizável em `template.yaml`).
+**Justificativa:** para um projeto acadêmico, não há razão para manter
+logs além de uma semana — o histórico relevante para debugar uma entrega
+recente cabe nesse período, e qualquer coisa além disso é puro custo de
+armazenamento sem valor operacional.
+
+### 2. Step Functions: STANDARD vs. EXPRESS Workflows
+
+**Observação (via métricas):** `LinksV3StateMachine` está declarada como
+`Type: STANDARD`, que cobra por **transição de estado** e mantém 90 dias
+de histórico de execução por padrão. O widget "Step Functions executions"
+do dashboard, junto com a duração média de cada execução (visível no
+console do Step Functions ou via `AWS/States` → `ExecutionTime`), permite
+decidir com dados se isso é a escolha certa.
+**Proposta:** se o volume de execuções crescer e as execuções
+continuarem curtas (segundos, não minutos/horas) e sem necessidade real
+de 90 dias de histórico por execução, migrar para `Type: EXPRESS`
+reduziria o custo por execução (cobrança por duração + requisição, não
+por transição) — relevante justamente em alto volume, que é onde o custo
+por transição do Standard mais pesa.
+**Trade-off a documentar:** Express não garante exactly-once (é
+at-least-once) e tem limite de 5 minutos por execução — ambos compatíveis
+com este pipeline (idempotência já existe via `Idempotency-Key`/
+`requestId`, e os 3 steps são rápidos), mas é a contrapartida que justifica
+manter Standard caso o volume real não justifique a migração.
+
+### 3. SQS `BatchSize` de 1 → avaliar aumento
+
+**Observação (via métricas):** `LinksProcessorFunction` e
+`LinksV3DlqConsumerFunction` estão configuradas com `BatchSize: 1` — uma
+invocação Lambda por mensagem. O widget "Lambda invocations" do dashboard,
+comparado ao volume real de mensagens nas filas (`AWS/SQS` →
+`NumberOfMessagesSent`), mostra se isso gera overhead perceptível.
+**Proposta:** se houver picos de volume, subir `BatchSize` (ex.: para 10)
+reduz o número de invocações Lambda proporcionalmente — e, por cobrança
+ser por invocação + duração, reduz custo sem necessariamente piorar
+latência percebida (que já é assíncrona nesses dois fluxos).
+**Trade-off a documentar:** um batch maior significa que uma falha em uma
+mensagem do lote pode afetar o processamento das demais, dependendo da
+configuração de retry/partial-batch-response — exigiria revisar
+`ReportBatchItemFailures` antes de aumentar o batch em produção.
 
