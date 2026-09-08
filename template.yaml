@@ -365,7 +365,17 @@ Resources:
         IncludeExecutionData: true
         Destinations:
           - CloudWatchLogsLogGroup:
-              LogGroupArn: !GetAtt LinksV3StateMachineLogGroup.Arn
+              # Built by hand instead of `!GetAtt
+              # LinksV3StateMachineLogGroup.Arn`: for AWS::Logs::LogGroup,
+              # that attribute isn't returned by the log group's own create
+              # call, so CloudFormation resolves it with a live
+              # logs:DescribeLogGroups call at deploy time — requiring that
+              # permission on whoever runs the deploy. A log group's ARN is
+              # fully predictable from its name, so building it here avoids
+              # the extra API call (and the permission) entirely. The
+              # trailing ":*" is required by Step Functions' logging
+              # configuration.
+              LogGroupArn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/states/${AWS::StackName}-LinksV3StateMachine:*"
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref LinksV3ValidateFunction
